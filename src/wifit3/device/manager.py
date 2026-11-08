@@ -261,9 +261,20 @@ def raw_devices() -> List[usb.core.Device]:
     return _bus_devices(_require_backend())
 
 
+def _native_entries() -> List[DeviceID]:
+    """The built-in Wi-Fi as one catalog entry, for hosts without USB Wi-Fi adapters (phones:
+    the radio is a platform PCIe device driven by the kernel, not a dongle to claim)."""
+    return [DeviceID(vid=0x18D1, pid=0x0002, chipset="BCM4375", vendor="Samsung",
+                     product_name="built-in Wi-Fi", extras={"native": True})]
+
+
 def devices() -> List[DeviceID]:
-    """Every supported device present on the USB bus right now."""
-    backend = _require_backend()
+    """Every supported device present on the USB bus right now; the built-in radio when the bus
+    has nothing (phones have no USB Wi-Fi to enumerate, and libusb may be absent entirely)."""
+    try:
+        backend = _require_backend()
+    except usb.core.NoBackendError:
+        return _native_entries()
     smap = supported_ids()
     out: List[DeviceID] = []
     seen: set[VidPid] = set()
@@ -281,6 +292,8 @@ def devices() -> List[DeviceID]:
         out.append(replace(entry, bus=dev.bus, address=dev.address))
         seen.add(slot)
     out.extend(_pnp_only_devices(smap, seen))
+    if not out:
+        out.extend(_native_entries())
     return out
 
 
@@ -332,6 +345,8 @@ def wlan_iface(device_id: DeviceID, name: str = "wlan0") -> Optional[WlanInterfa
     ``devices()`` tags them) the exact physical card is opened via a targeted ``usb.core.find``; a
     bare catalog DeviceID (bus/address None) falls back to the first VID:PID match. ``connect()``
     opens it, not this."""
+    if device_id.extras.get("native"):
+        return _native_iface(device_id, name)
     if supported_ids().get((device_id.vid, device_id.pid)) is None:
         return None
     dev = _live_dev(device_id)
@@ -354,6 +369,15 @@ def wlan_iface(device_id: DeviceID, name: str = "wlan0") -> Optional[WlanInterfa
                          chipset=device_id.chipset, vendor=device_id.vendor,
                          product_name=device_id.product_name,
                          bus=dev.bus, address=dev.address)
+
+
+def _native_iface(device_id: DeviceID, name: str) -> WlanInterface:
+    """A ``WlanInterface`` over the built-in radio: the native driver, no USB handle."""
+    from wifit3.native_driver import NativeDriver
+    driver = NativeDriver(phy=device_id.extras.get("phy", "phy0"),
+                          parent=device_id.extras.get("parent", "wlan0"))
+    return WlanInterface(driver, name, device_id.description, chipset=device_id.chipset,
+                         vendor=device_id.vendor, product_name=device_id.product_name)
 
 
 def wlan_ifaces() -> List[WlanInterface]:
